@@ -1,0 +1,2 @@
+#!/bin/bash
+/usr/local/emhttp/plugins/cache.dirs2/scripts/rc.cachedirs2 stop >/dev/null 2>&1

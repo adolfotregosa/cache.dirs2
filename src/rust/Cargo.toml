@@ -1,0 +1,16 @@
+[package]
+name = "cachedirs2"
+version = "2.0.0"
+edition = "2021"
+description = "Keeps Unraid directory listings and file metadata in RAM without waking sleeping disks"
+license = "GPL-2.0-only"
+
+# No dependencies on purpose: the binary is built statically and only uses std.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

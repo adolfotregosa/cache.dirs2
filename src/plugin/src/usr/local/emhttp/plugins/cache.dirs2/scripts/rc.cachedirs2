@@ -1,0 +1,81 @@
+#!/bin/bash
+# Cache Directories 2.0 service control: start | stop | restart | apply | status
+plugin=cache.dirs2
+docroot=/usr/local/emhttp/plugins/$plugin
+bin=$docroot/bin/cachedirs2
+defaults=$docroot/default.cfg
+cfg=/boot/config/plugins/$plugin/$plugin.cfg
+state=/var/local/$plugin
+pidfile=/var/run/cachedirs2.pid
+
+say() { echo "$1"; logger -t cachedirs2 "$1"; }
+
+get() {
+  local v
+  v=$(grep -s "^$1=" "$cfg" | tail -1 | cut -d'"' -f2)
+  [[ -z $v ]] && v=$(grep -s "^$1=" "$defaults" | tail -1 | cut -d'"' -f2)
+  echo "$v"
+}
+
+running() { [[ -f $pidfile ]] && kill -0 "$(cat $pidfile)" 2>/dev/null; }
+
+# array started, or (array-less setups) pools started
+array_started() { grep -qsE '^(mdState="STARTED"|fsState="Started")' /var/local/emhttp/var.ini; }
+
+start() {
+  if running; then echo "cachedirs2 already running"; return 0; fi
+  if pgrep -f 'dynamix.cache.dirs/scripts/cache_dirs' >/dev/null; then
+    say "warning: the old Folder Caching plugin (cache_dirs) is also running. Disable or remove it, both fight over the same cache."
+  fi
+  mkdir -p "$state"
+  local p
+  p=$(get pressure)
+  [[ $p =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 200 )) || p=10
+  [[ -f $state/orig_pressure ]] || cat /proc/sys/vm/vfs_cache_pressure > "$state/orig_pressure"
+  sysctl -q -w vm.vfs_cache_pressure="$p"
+  # idle I/O class + lowest CPU priority: never compete with real work
+  nohup ionice -c3 nice -n19 "$bin" --config "$defaults" --config "$cfg" >/dev/null 2>&1 &
+  echo $! > "$pidfile"
+  sleep 0.3
+  if running; then
+    say "started (pid $(cat $pidfile)), vfs_cache_pressure=$p"
+  else
+    rm -f "$pidfile"
+    say "failed to start, run '$bin --config $cfg --foreground' to see why"
+    return 1
+  fi
+}
+
+stop() {
+  if running; then
+    local pid
+    pid=$(cat "$pidfile")
+    kill "$pid" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    kill -9 "$pid" 2>/dev/null
+    say "stopped"
+  fi
+  rm -f "$pidfile"
+  if [[ -f $state/orig_pressure ]]; then
+    sysctl -q -w vm.vfs_cache_pressure="$(cat "$state/orig_pressure")"
+    rm -f "$state/orig_pressure"
+  fi
+  rm -f "$state/status.json"
+}
+
+# Called after settings change and when disks are mounted.
+apply() {
+  stop
+  if [[ $(get service) == 1 ]] && array_started; then
+    start
+  fi
+}
+
+case "$1" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  apply) apply ;;
+  status) if running; then echo "running (pid $(cat $pidfile))"; else echo "stopped"; exit 1; fi ;;
+  *) echo "Usage: $(basename "$0") start|stop|restart|apply|status"; exit 2 ;;
+esac

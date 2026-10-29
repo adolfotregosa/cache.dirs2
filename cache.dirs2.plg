@@ -1,0 +1,89 @@
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "cache.dirs2">
+<!ENTITY author    "Adolfo Rodrigues">
+<!ENTITY version   "2026.10.29">
+<!ENTITY launch    "Settings/CacheDirs2">
+<!ENTITY plgdir    "/boot/config/plugins/&name;">
+<!ENTITY pkgname   "&name;-&version;-x86_64-1">
+<!ENTITY pkg       "&pkgname;.txz">
+<!ENTITY support   "https://github.com/adolfotregosa/cache.dirs2">
+<!ENTITY gitURL    "https://raw.githubusercontent.com/adolfotregosa/cache.dirs2/main">
+<!ENTITY pluginURL "&gitURL;/&name;.plg">
+<!ENTITY dl        "&gitURL;/packages">
+]>
+<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" support="&support;" icon="folder-open" min="7.3.0">
+
+<CHANGES>
+###&version;
+
+###2026.10.28b
+- Fix: a missing extra mount point is logged once, not every refresh
+- Status explains when nothing is cached because every disk is solid-state
+- Starts on setups without an array (pools only)
+
+###2026.10.28a
+- Fix: the default "Hard drives only" setting now also skips SSD/NVMe array disks, not just SSD pools
+- Requires Unraid 7.3 or later
+
+###2026.10.28
+- First release: Rust daemon that stats every entry (file inodes stay cached, not just folder names)
+- Never wakes a disk to check its cache; every refresh is measured with /sys/block read counters
+- Back-off (1h, doubling to 24h) after a refresh had to wake a sleeping disk
+- Skips SSD/NVMe-only pools by default; supports extra mount points (Unassigned Devices, SnapRAID)
+- Live status table on the settings page
+</CHANGES>
+
+<!-- Stop a running instance before upgrading; delete older packages from the flash drive. -->
+<FILE Run="/bin/bash">
+<INLINE>
+rc=/usr/local/emhttp/plugins/&name;/scripts/rc.cachedirs2
+[ -x "$rc" ] &amp;&amp; "$rc" stop
+for f in &plgdir;/&name;-*.txz; do
+  [ -e "$f" ] &amp;&amp; [ "$f" != "&plgdir;/&pkg;" ] &amp;&amp; rm -f "$f"
+done
+true
+</INLINE>
+</FILE>
+
+<!-- Downloaded once to the flash drive; reinstalled from there on every boot. -->
+<FILE Name="&plgdir;/&pkg;" Run="upgradepkg --install-new --reinstall">
+<URL>&dl;/&pkg;</URL>
+</FILE>
+
+<FILE Name="/usr/local/emhttp/plugins/&name;/README.md">
+<INLINE>
+**Cache Directories 2.0**
+
+Keeps folder listings and file details in RAM so browsing shares doesn't wake sleeping disks. Never spins up a disk to check its cache, and backs off if a refresh ever had to wake one.
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash">
+<INLINE>
+mkdir -p &plgdir;
+[ -f &plgdir;/&name;.cfg ] || cp /usr/local/emhttp/plugins/&name;/default.cfg &plgdir;/&name;.cfg
+if [ -f /var/log/plugins/dynamix.cache.dirs.plg ]; then
+  echo ""
+  echo "WARNING: the original Folder Caching plugin (dynamix.cache.dirs) is installed."
+  echo "Disable or uninstall it before enabling Cache Directories 2.0."
+fi
+/usr/local/emhttp/plugins/&name;/scripts/rc.cachedirs2 apply
+echo ""
+echo "Cache Directories 2.0 &version; installed. Configure it under Settings > Utilities > Cache Directories 2.0."
+</INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+/usr/local/emhttp/plugins/&name;/scripts/rc.cachedirs2 stop
+for p in /var/log/packages/&name;-[0-9]*; do
+  [ -e "$p" ] &amp;&amp; removepkg "$(basename "$p")"
+done
+rm -rf /usr/local/emhttp/plugins/&name; /var/local/&name;
+rm -rf &plgdir;
+echo "Cache Directories 2.0 removed."
+</INLINE>
+</FILE>
+
+</PLUGIN>

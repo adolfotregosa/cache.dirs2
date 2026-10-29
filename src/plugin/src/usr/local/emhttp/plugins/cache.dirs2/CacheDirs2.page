@@ -1,0 +1,160 @@
+Menu="Utilities"
+Title="Cache Directories 2.0"
+Icon="folder-open"
+---
+<?PHP
+/* Cache Directories 2.0 — GPL-2.0 */
+$plugin = 'cache.dirs2';
+$cfg = parse_plugin_cfg($plugin);
+$bin = "/usr/local/emhttp/plugins/$plugin/bin/cachedirs2";
+$version = preg_replace('/^cachedirs2\s+/', 'v', trim(@exec(escapeshellarg($bin)." --version 2>/dev/null")));
+
+/* Folder hints never touch a disk: the daemon reports the top-level folders it
+   found on the disks it caches; before it runs, fall back to Unraid's share list. */
+$status = @json_decode(@file_get_contents('/var/local/cache.dirs2/status.json'), true);
+$on_cached = is_array($status['folders'] ?? null) ? $status['folders'] : null;
+$shares = @parse_ini_file('/var/local/emhttp/shares.ini', true) ?: [];
+$share_names = array_keys($shares);
+sort($share_names, SORT_NATURAL | SORT_FLAG_CASE);
+$split = fn($v) => array_values(array_filter(array_map('trim', explode(',', $v ?? '')), 'strlen'));
+$excluded = $split($cfg['exclude']);
+
+$old_plugin = is_file('/var/log/plugins/dynamix.cache.dirs.plg');
+$h = fn($v) => htmlspecialchars($v ?? '', ENT_QUOTES);
+?>
+<style>
+#cd2-status{text-align:center}
+#cd2-status table{width:auto;border-collapse:collapse;margin:8px auto 0}
+#cd2-status th,#cd2-status td{text-align:left;padding:4px 18px;white-space:nowrap}
+#cd2-status td:last-child{white-space:normal;min-width:14em}
+#cd2-status th{font-weight:600;border-bottom:1px solid var(--gray-500, #888)}
+#cd2-status tbody tr:hover{background:rgba(127,127,127,.08)}
+#cd2-status td.num,#cd2-status th.num{text-align:right}
+#cd2-status .asleep{color:var(--blue-500, #3b82f6)}
+#cd2-status .awake{color:var(--green-500, #22a722)}
+#cd2-status .woke{color:var(--orange-500, #e68a00);font-weight:600}
+#cd2-status .muted{opacity:.7}
+.cd2-hint{opacity:.75;font-size:.95em}
+</style>
+
+<?if ($old_plugin):?>
+<p class="orange-text"><i class="fa fa-warning"></i> The original Folder Caching plugin is installed. Disable or uninstall it before enabling this one, otherwise both walk your disks and fight over cache pressure.</p>
+<?endif;?>
+
+<div class="title"><span class="left"><i class="fa fa-heartbeat title"></i>Live status</span><span class="right cd2-hint"><?=$h($version)?></span></div>
+<div id="cd2-status"><p class="muted">Loading…</p></div>
+
+<div class="title"><span class="left"><i class="fa fa-cog title"></i>Settings</span></div>
+<form markdown="1" name="cd2_settings" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="<?=$plugin?>/<?=$plugin?>.cfg">
+<input type="hidden" name="#command" value="/plugins/<?=$plugin?>/scripts/rc.cachedirs2">
+<input type="hidden" name="#arg[1]" value="apply">
+
+Enable folder caching:
+: <select name="service">
+  <?=mk_option($cfg['service'], "0", "No")?>
+  <?=mk_option($cfg['service'], "1", "Yes")?>
+  </select>
+
+:cd2_service_plug:
+> Runs while the array is started. It stops automatically when the array stops and starts again when disks are mounted.
+:end
+
+Disks to cache:
+: <select name="targets">
+  <?=mk_option($cfg['targets'], "rotational", "Hard drives only")?>
+  <?=mk_option($cfg['targets'], "array", "All array disks")?>
+  <?=mk_option($cfg['targets'], "all", "All array disks and all pools")?>
+  </select>
+
+:cd2_targets_plug:
+> SSD and NVMe devices don't spin down, so caching them only costs RAM. The default caches array disks and pools only if they contain at least one hard drive. Extra mount points are always cached.
+:end
+
+Only these folders:
+: <input type="text" name="include" value="<?=$h($cfg['include'])?>" placeholder="All folders" style="width:28em">
+
+:cd2_include_plug:
+> Comma-separated top-level folder (share) names. Leave empty to cache every folder except the excluded ones. Names are exact and case-sensitive.
+:end
+
+Never these folders:
+: <input type="text" name="exclude" value="<?=$h($cfg['exclude'])?>" style="width:28em">
+<?if ($on_cached !== null):?>
+<br><span class="cd2-hint">On the disks being cached: <?=implode(', ', array_map(fn($f) => in_array($f, $excluded, true) ? '<s>'.$h($f).'</s>' : $h($f), $on_cached)) ?: 'nothing yet'?></span>
+<?$elsewhere = array_values(array_diff($excluded, $on_cached));?>
+<?if ($elsewhere):?><br><span class="cd2-hint">Not on any cached disk, so excluding them changes nothing here: <?=$h(implode(', ', $elsewhere))?></span><?endif;?>
+<?elseif ($share_names):?>
+<br><span class="cd2-hint">Your shares: <?=$h(implode(', ', $share_names))?>. Once caching runs, this shows only folders on the disks being cached.</span>
+<?endif;?>
+
+:cd2_exclude_plug:
+> Folders with huge numbers of small files (appdata, Plex or Immich metadata, backups) use a lot of RAM and are rarely browsed. Excluding them makes the rest of the cache much more likely to survive.
+:end
+
+Extra mount points:
+: <input type="text" name="extra" value="<?=$h($cfg['extra'])?>" placeholder="/mnt/disks/D1, /mnt/disks/D2" style="width:28em">
+
+:cd2_extra_plug:
+> Disks outside the Unraid array, for example Unassigned Devices disks used with SnapRAID or mergerfs. Spin state is read with hdparm -C, which does not wake the drive.
+:end
+
+Refresh every (seconds):
+: <input type="number" name="interval" min="5" max="3600" value="<?=$h($cfg['interval'])?>" class="narrow">
+
+:cd2_interval_plug:
+> How often cached folders are walked again. A walk of fully cached metadata reads nothing from disk; it only keeps the entries recently used so the kernel keeps them. 30 seconds is a good default.
+:end
+
+Sleeping disks:
+: <select name="sleeping">
+  <?=mk_option($cfg['sleeping'], "refresh", "Keep refreshing")?>
+  <?=mk_option($cfg['sleeping'], "skip", "Leave alone")?>
+  </select>
+
+:cd2_sleeping_plug:
+> Keep refreshing: the cache of a sleeping disk stays hot, which is what keeps it asleep when you browse. If the kernel evicted part of it anyway, the refresh wakes the disk once. That is logged to the syslog, and the disk is then left alone while asleep for at least an hour (doubling up to 24 hours if it keeps happening). Only reads the refresh itself caused count, so other programs using the disk are never blamed on it. On ZFS that can't be measured exactly, so there wakes aren't detected at all.
+>
+> Leave alone: sleeping disks are never touched. Their cache may slowly age out, and the next browse may wake them.
+:end
+
+Cache disks at startup:
+: <select name="prime">
+  <?=mk_option($cfg['prime'], "1", "Yes, even if that wakes them")?>
+  <?=mk_option($cfg['prime'], "0", "No, wait until each disk spins up")?>
+  </select>
+
+Maximum folder depth:
+: <input type="number" name="maxdepth" min="0" max="999" value="<?=$h($cfg['maxdepth'])?>" class="narrow"> <span class="cd2-hint">0 = unlimited</span>
+
+Cache pressure:
+: <input type="number" name="pressure" min="1" max="200" value="<?=$h($cfg['pressure'])?>" class="narrow"> <span class="cd2-hint">Linux default is 100, plugin default 10</span>
+
+:cd2_pressure_plug:
+> Sets vm.vfs_cache_pressure while the plugin runs, and restores the previous value when it stops. Lower values make the kernel keep folder and file metadata in preference to file data. Try 1 if disks still wake up; raise it if the server runs short of memory.
+:end
+
+Memory warning at (% of RAM):
+: <input type="number" name="budget" min="1" max="90" value="<?=$h($cfg['budget'])?>" class="narrow">
+
+Verbose logging:
+: <select name="verbose">
+  <?=mk_option($cfg['verbose'], "0", "No")?>
+  <?=mk_option($cfg['verbose'], "1", "Yes")?>
+  </select>
+
+&nbsp;
+: <input type="submit" value="Apply"><input type="button" value="Done" onclick="done()">
+</form>
+
+<script>
+function cd2Refresh() {
+  $.get('/plugins/cache.dirs2/include/status.php', function(html) {
+    $('#cd2-status').html(html);
+  });
+}
+$(function() {
+  cd2Refresh();
+  setInterval(cd2Refresh, 5000);
+});
+</script>
