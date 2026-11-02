@@ -1,0 +1,8 @@
+          |-----handy-ruler------------------------------------------------------|
+cache.dirs2: cache.dirs2 (Cache Directories 2.0)
+cache.dirs2:
+cache.dirs2: Keeps Unraid folder listings and file metadata in RAM so browsing
+cache.dirs2: shares does not spin up sleeping disks. Measures every refresh with
+cache.dirs2: the disk's own read counter and backs off instead of waking disks
+cache.dirs2: over and over.
+cache.dirs2:

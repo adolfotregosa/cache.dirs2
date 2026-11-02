@@ -1,0 +1,143 @@
+#!/bin/bash
+# Cache Directories 2.0 service control: start | stop | restart | apply | shutdown | status
+plugin=cache.dirs2
+docroot=/usr/local/emhttp/plugins/$plugin
+bin=$docroot/bin/cachedirs2
+defaults=$docroot/default.cfg
+cfg=/boot/config/plugins/$plugin/$plugin.cfg
+state=/var/local/$plugin
+pidfile=/var/run/cachedirs2.pid
+cg_root=/sys/fs/cgroup
+cg=$cg_root/cachedirs2
+holderpid=/var/run/cachedirs2-holder.pid
+
+say() { echo "$1"; logger -t cachedirs2 "$1"; }
+
+get() {
+  local v
+  v=$(grep -s "^$1=" "$cfg" | tail -1 | cut -d'"' -f2)
+  [[ -z $v ]] && v=$(grep -s "^$1=" "$defaults" | tail -1 | cut -d'"' -f2)
+  echo "$v"
+}
+
+running() { [[ -f $pidfile ]] && kill -0 "$(cat $pidfile)" 2>/dev/null; }
+
+# array started, or (array-less setups) pools started
+array_started() { grep -qsE '^(mdState="STARTED"|fsState="Started")' /var/local/emhttp/var.ini; }
+
+# --- RAM protection (cgroup v2) ---------------------------------------------
+# The daemon joins $cg and sets memory.min there. Unraid removes empty cgroups
+# within seconds, so a placeholder process keeps the group, and the protection on
+# everything already cached, alive while the daemon restarts.
+cg_available() {
+  [[ $(stat -fc %T $cg_root 2>/dev/null) == cgroup2fs ]] && grep -qw memory $cg_root/cgroup.controllers 2>/dev/null
+}
+# The stored PID only counts if that process really is our placeholder: if it died
+# and Linux reused the number, we must not adopt or kill someone else's process.
+holder_running() {
+  [[ -f $holderpid ]] || return 1
+  local pid
+  pid=$(cat "$holderpid")
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  [[ $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) == "sleep infinity " ]]
+}
+
+cg_prepare() {
+  cg_available || return 0
+  grep -qw memory $cg_root/cgroup.subtree_control || echo +memory > $cg_root/cgroup.subtree_control 2>/dev/null
+  mkdir -p $cg 2>/dev/null || return 0
+  if ! holder_running; then
+    nohup sleep infinity >/dev/null 2>&1 &
+    echo $! > $holderpid
+  fi
+  grep -qx "$(cat $holderpid)" $cg/cgroup.procs 2>/dev/null || echo "$(cat $holderpid)" > $cg/cgroup.procs 2>/dev/null
+}
+
+# Protection off, group kept: what's cached stays charged to the group, so
+# re-enabling protects it again at once (plugin disabled).
+cg_unprotect() {
+  [[ -d $cg ]] && echo 0 > $cg/memory.min 2>/dev/null
+  return 0
+}
+
+# Drop the protection and the group (array stopping, uninstall).
+cg_release() {
+  [[ -d $cg ]] && echo 0 > $cg/memory.min 2>/dev/null
+  if holder_running; then kill "$(cat $holderpid)" 2>/dev/null; fi
+  rm -f $holderpid
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -d $cg ]] || break
+    rmdir $cg 2>/dev/null && break
+    sleep 0.2
+  done
+}
+
+start() {
+  if running; then echo "cachedirs2 already running"; return 0; fi
+  if pgrep -f 'dynamix.cache.dirs/scripts/cache_dirs' >/dev/null; then
+    say "warning: the old Folder Caching plugin (cache_dirs) is also running. Disable or remove it, both fight over the same cache."
+  fi
+  mkdir -p "$state"
+  local p
+  p=$(get pressure)
+  [[ $p =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 200 )) || p=10
+  [[ -f $state/orig_pressure ]] || cat /proc/sys/vm/vfs_cache_pressure > "$state/orig_pressure"
+  sysctl -q -w vm.vfs_cache_pressure="$p"
+  cg_prepare
+  # idle I/O class + lowest CPU priority: never compete with real work
+  nohup ionice -c3 nice -n19 "$bin" --config "$defaults" --config "$cfg" >/dev/null 2>&1 &
+  echo $! > "$pidfile"
+  sleep 0.3
+  if running; then
+    say "started (pid $(cat $pidfile)), vfs_cache_pressure=$p"
+  else
+    rm -f "$pidfile"
+    say "failed to start, run '$bin --config $cfg --foreground' to see why"
+    return 1
+  fi
+}
+
+stop() {
+  if running; then
+    local pid
+    pid=$(cat "$pidfile")
+    kill "$pid" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    kill -9 "$pid" 2>/dev/null
+    say "stopped"
+  fi
+  rm -f "$pidfile"
+  if [[ -f $state/orig_pressure ]]; then
+    sysctl -q -w vm.vfs_cache_pressure="$(cat "$state/orig_pressure")"
+    rm -f "$state/orig_pressure"
+  fi
+  rm -f "$state/status.json"
+}
+
+# Stop and also drop the RAM protection.
+shutdown() {
+  stop
+  cg_release
+}
+
+# Called after settings change and when disks are mounted. A plain restart keeps
+# the protection; disabling the plugin turns it off but keeps the group.
+apply() {
+  if [[ $(get service) == 1 ]] && array_started; then
+    stop
+    start
+  else
+    stop
+    cg_unprotect
+  fi
+}
+
+case "$1" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  apply) apply ;;
+  shutdown) shutdown ;;
+  status) if running; then echo "running (pid $(cat $pidfile))"; else echo "stopped"; exit 1; fi ;;
+  *) echo "Usage: $(basename "$0") start|stop|restart|apply|shutdown|status"; exit 2 ;;
+esac
